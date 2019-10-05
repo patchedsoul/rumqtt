@@ -115,8 +115,7 @@ impl Connection {
     /// the connection when `is_network_enabled` flag is set true
     fn connect_or_not(&mut self, mqtt_connect_future: impl Future<Item = MqttFramed, Error = ConnectError>) -> Result<(Runtime, Option<MqttFramed>), bool> {
         let mut rt = Runtime::new().unwrap();
-        let timeout = Duration::from_secs(30);
-        let mqtt_connect_deadline = Timeout::new(mqtt_connect_future, timeout);
+        let mqtt_connect_deadline = Timeout::new(mqtt_connect_future, self.mqttoptions.connection_timeout());
 
         if !self.is_network_enabled {
             return Ok((rt, None));
@@ -256,8 +255,8 @@ impl Connection {
 
     /// Sends connection status on blocked connections status call in `run`
     fn handle_connection_success(&mut self) {
-        if self.connection_count == 0 {
-            let connection_tx = self.connection_tx.take().unwrap();
+        // send connection success notification only the first time
+        if let Some(connection_tx) = self.connection_tx.take() {
             connection_tx.try_send(Ok(())).unwrap();
         } else {
             let _ = self.notification_tx.try_send(Notification::Reconnection);
@@ -274,8 +273,8 @@ impl Connection {
             None => Err(ConnectError::Timeout),
         };
 
-        if self.connection_count == 0 {
-            let connection_tx = self.connection_tx.take().unwrap();
+        // send connection error notification only the first time
+        if let Some(connection_tx) = self.connection_tx.take() {
             connection_tx.try_send(error).unwrap();
         }
     }
@@ -435,7 +434,7 @@ impl Connection {
     /// Apply throttling if configured
     fn throttled_network_stream(&mut self, requests: impl Stream<Item = Request, Error = NetworkError>) -> impl Stream<Item = Request, Error = NetworkError> {
         if let Some(rate) = self.mqttoptions.throttle() {
-            let duration = Duration::from_nanos(1_000_000_000 / rate);
+            let duration = Duration::from_nanos((1_000_000_000.0 / rate) as u64);
             let throttled = requests.throttle(duration).map_err(|_| NetworkError::Throttle);
             Either::A(throttled)
         } else {
@@ -899,7 +898,7 @@ mod test {
     #[cfg(target_os = "linux")]
     #[test]
     fn throttled_stream_operates_at_specified_rate() {
-        let mqttoptions = MqttOptions::default().set_throttle(5);
+        let mqttoptions = MqttOptions::default().set_throttle(5.0);
         let mqtt_state = MqttState::new(mqttoptions.clone());
 
         let (mut connection, _userhandle, mut runtime) = mock_mqtt_connection(mqttoptions, mqtt_state);
